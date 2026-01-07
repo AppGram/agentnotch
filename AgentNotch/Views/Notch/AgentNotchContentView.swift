@@ -1,0 +1,967 @@
+import SwiftUI
+
+struct AgentNotchContentView: View {
+    @EnvironmentObject var telemetryCoordinator: TelemetryCoordinator
+    @StateObject private var notchVM = NotchViewModel()
+    @StateObject private var settings = AppSettings.shared
+    @State private var isHovering = false
+    @State private var hoverTask: Task<Void, Never>?
+    @State private var sessionStart = Date()
+    @State private var showActivityGlow = false
+    @State private var glowTask: Task<Void, Never>?
+    @State private var clearTask: Task<Void, Never>?
+    @State private var visibleToolCalls: [ToolCall] = []
+    @State private var showStartupGlow = false
+    @State private var startupGlowTask: Task<Void, Never>?
+    @State private var showErrorGlow = false
+    @State private var errorGlowTask: Task<Void, Never>?
+    @State private var showCompletionNotice = false
+    @State private var completionNoticeTask: Task<Void, Never>?
+    @State private var completionDebounceTask: Task<Void, Never>?
+    @State private var lastCompletionId: UUID?
+    @State private var completionToolCall: ToolCall?
+    @State private var hadActiveToolCalls = false
+    @State private var memeAutoOpenTask: Task<Void, Never>?
+    @State private var memeGraceTask: Task<Void, Never>?
+    @State private var isMemeGraceActive = false
+    @State private var toolCallUpdateTask: Task<Void, Never>?
+
+    private let animationSpring = Animation.interactiveSpring(response: 0.38, dampingFraction: 0.8, blendDuration: 0)
+    private let startupGlowColor = Color(red: 0.55, green: 0.8, blue: 0.9)
+    private let startupBrightColor = Color(red: 0.75, green: 0.9, blue: 1.0)
+    private let errorGlowColor = Color(red: 0.9, green: 0.2, blue: 0.2)
+    private let errorBrightColor = Color(red: 1.0, green: 0.3, blue: 0.3)
+
+    /// Show glow when there's recent activity (event within last 2 seconds)
+    private var hasRecentActivity: Bool {
+        guard let lastCall = visibleToolCalls.first else { return false }
+        let elapsed = Date().timeIntervalSince(lastCall.endTime ?? lastCall.startTime)
+        return elapsed < 2.0 || lastCall.isActive
+    }
+
+    private var isExpanded: Bool {
+        notchVM.notchState == .open || notchVM.notchState == .peeking
+    }
+
+    private var recentTokenTotal: Int {
+        if telemetryCoordinator.sessionTokenTotal > 0 {
+            return telemetryCoordinator.sessionTokenTotal
+        }
+        return visibleToolCalls.compactMap { $0.tokenCount }.reduce(0, +)
+    }
+
+    private var topCornerRadius: CGFloat {
+        isExpanded ? cornerRadiusInsets.opened.top : cornerRadiusInsets.closed.top
+    }
+
+    private var bottomCornerRadius: CGFloat {
+        isExpanded ? cornerRadiusInsets.opened.bottom : cornerRadiusInsets.closed.bottom
+    }
+
+    /// Calculate the content width (includes wings + center notch area)
+    private var closedContentWidth: CGFloat {
+        notchVM.closedNotchSize.width + 160  // wings extend 80px on each side
+    }
+
+    private var activityGlowSource: TelemetrySource {
+        visibleToolCalls.first?.source ?? telemetryCoordinator.telemetrySource
+    }
+
+    private var activityGlowColor: Color {
+        switch activityGlowSource {
+        case .codex:
+            return Color(red: 0.1, green: 0.3, blue: 0.7)
+        case .claudeCode, .unknown:
+            return Color(red: 0.9, green: 0.4, blue: 0.1)
+        }
+    }
+
+    private var activityBrightColor: Color {
+        switch activityGlowSource {
+        case .codex:
+            return Color(red: 0.2, green: 0.45, blue: 0.9)
+        case .claudeCode, .unknown:
+            return Color(red: 1.0, green: 0.55, blue: 0.2)
+        }
+    }
+
+    private var hasActiveToolCall: Bool {
+        visibleToolCalls.first?.isActive == true
+    }
+
+    private var memeVideoURL: URL? {
+        if let bundleURL = Bundle.main.url(forResource: "videoplayback", withExtension: "mp4") {
+            return bundleURL
+        }
+        return URL(string: settings.memeVideoURL)
+    }
+
+    private var shouldShowMemeVideo: Bool {
+        settings.showMemeVideo && memeVideoURL != nil && (hasActiveToolCall || isMemeGraceActive)
+    }
+
+    var body: some View {
+        VStack(spacing: 0) {
+            notchBody
+                .padding(
+                    .horizontal,
+                    isExpanded
+                        ? cornerRadiusInsets.opened.top
+                        : cornerRadiusInsets.closed.bottom
+                )
+                .padding([.horizontal, .bottom], isExpanded ? 12 : 0)
+                .background(Color.black)
+                .mask(
+                    NotchShape(
+                        topCornerRadius: topCornerRadius,
+                        bottomCornerRadius: bottomCornerRadius
+                    )
+                )
+                .contentShape(
+                    NotchShape(
+                        topCornerRadius: topCornerRadius,
+                        bottomCornerRadius: bottomCornerRadius
+                    )
+                )
+                .onHover { hovering in
+                    handleHover(hovering)
+                }
+                .onTapGesture {
+                    notchVM.toggle()
+                }
+                .overlay {
+                    if showStartupGlow && notchVM.notchState == .closed {
+                        NotchGlowBorder(
+                            topCornerRadius: topCornerRadius,
+                            bottomCornerRadius: bottomCornerRadius,
+                            glowColor: startupGlowColor,
+                            brightColor: startupBrightColor
+                        )
+                    } else if showErrorGlow && notchVM.notchState == .closed {
+                        NotchGlowBorder(
+                            topCornerRadius: topCornerRadius,
+                            bottomCornerRadius: bottomCornerRadius,
+                            glowColor: errorGlowColor,
+                            brightColor: errorBrightColor
+                        )
+                    } else if (showActivityGlow || (telemetryCoordinator.isAgentActive && hasActiveToolCall))
+                                && notchVM.notchState == .closed
+                                && !showCompletionNotice {
+                        NotchGlowBorder(
+                            topCornerRadius: topCornerRadius,
+                            bottomCornerRadius: bottomCornerRadius,
+                            glowColor: activityGlowColor,
+                            brightColor: activityBrightColor
+                        )
+                    }
+                }
+                .onChange(of: telemetryCoordinator.recentToolCalls.count) { _, _ in
+                    handleToolCallUpdate()
+                }
+                .onChange(of: telemetryCoordinator.recentToolCalls.first?.id) { _, _ in
+                    handleToolCallUpdate()
+                }
+                .onChange(of: settings.showSourceCodex) { _, _ in
+                    handleToolCallUpdate()
+                }
+                .onChange(of: settings.showSourceClaudeCode) { _, _ in
+                    handleToolCallUpdate()
+                }
+                .onChange(of: settings.showSourceUnknown) { _, _ in
+                    handleToolCallUpdate()
+                }
+                .onChange(of: telemetryCoordinator.isAgentActive) { wasActive, isActive in
+                    if wasActive && !isActive {
+                        // Agent just finished - trigger completion notice and stop glows
+                        stopAllGlows()
+                        handleAgentCompletion()
+                    }
+                }
+                .onChange(of: hasActiveToolCall) { _, isActive in
+                    updateMemeAutoOpen(isActive: isActive)
+                    updateMemeGrace(isActive: isActive)
+                }
+                .onChange(of: settings.showMemeVideo) { _, isEnabled in
+                    if isEnabled {
+                        updateMemeAutoOpen(isActive: hasActiveToolCall)
+                        updateMemeGrace(isActive: hasActiveToolCall)
+                    } else {
+                        memeAutoOpenTask?.cancel()
+                        memeGraceTask?.cancel()
+                        isMemeGraceActive = false
+                    }
+                }
+                .shadow(
+                    color: (isExpanded || isHovering) ? .black.opacity(0.6) : .clear,
+                    radius: 8
+                )
+                .animation(animationSpring, value: notchVM.notchState)
+                .animation(animationSpring, value: notchVM.notchSize)
+        }
+        .padding(.bottom, isExpanded ? 8 : closedNotchGlowPadding)
+        .frame(maxWidth: windowSize.width, maxHeight: windowSize.height, alignment: .top)
+        .compositingGroup()
+        .preferredColorScheme(.dark)
+        .onAppear {
+            triggerStartupGlow()
+        }
+        .onDisappear {
+            startupGlowTask?.cancel()
+            memeAutoOpenTask?.cancel()
+            memeGraceTask?.cancel()
+            toolCallUpdateTask?.cancel()
+        }
+    }
+
+    @ViewBuilder
+    private var notchBody: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            // Header - always visible
+            notchHeader
+                .frame(height: notchVM.closedNotchSize.height)
+
+            // Expanded content
+            if notchVM.notchState == .open {
+                expandedContent
+                    .frame(height: notchVM.notchSize.height - notchVM.closedNotchSize.height)
+                    .transition(.opacity.combined(with: .scale(scale: 0.95, anchor: .top)))
+            } else if notchVM.notchState == .peeking {
+                peekContent
+                    .frame(height: notchVM.notchSize.height - notchVM.closedNotchSize.height)
+                    .transition(.opacity.combined(with: .scale(scale: 0.95, anchor: .top)))
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var notchHeader: some View {
+        if notchVM.notchState == .closed {
+            closedHeader
+        } else if notchVM.notchState == .peeking {
+            peekHeader
+        } else {
+            openHeader
+        }
+    }
+
+    @ViewBuilder
+    private var closedHeader: some View {
+        let lastCall = visibleToolCalls.first
+        // Calculate left wing width: status indicator (~14px) + spacing (6px) + text (~9px per char), max 18 chars
+        let toolNameWidth: CGFloat = lastCall.map { CGFloat(min($0.toolName.count, 18)) * 9 } ?? 0
+        let leftWingWidth: CGFloat = lastCall != nil ? 51 + toolNameWidth : 18
+        // Wider right wing for Claude Code to fit token breakdown + cost
+        let hasClaudeTokens = settings.showNotchTokenBreakdown
+            && lastCall?.source == .claudeCode
+            && lastCall?.inputTokens != nil
+        let hasClaudeCost = settings.showNotchCost
+            && lastCall?.source == .claudeCode
+            && (lastCall?.costUsd ?? 0) > 0
+        let rightWingWidth: CGFloat = lastCall != nil
+            ? (hasClaudeTokens || hasClaudeCost ? 150 : 92)
+            : 18
+        let totalWidth = notchVM.closedNotchSize.width + leftWingWidth + rightWingWidth
+
+        HStack(spacing: 0) {
+            // Left wing - source indicator (+ tool name if available)
+            HStack(spacing: 6) {
+                SourceIndicatorView(source: telemetryCoordinator.telemetrySource, isActive: telemetryCoordinator.isAgentActive)
+                if let toolCall = lastCall {
+                    Text(toolCall.toolName)
+                        .font(.system(size: 10, weight: .medium))
+                        .foregroundColor(.white.opacity(0.85))
+                        .lineLimit(1)
+                        .truncationMode(.tail)
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 2)
+                        .background(Color.white.opacity(0.08), in: Capsule())
+                }
+            }
+            .frame(width: leftWingWidth, alignment: .leading)
+            .padding(.leading, 8)
+
+            Spacer()
+
+            // Right wing - spinner or duration/tokens (only when tool call exists)
+            if let toolCall = lastCall {
+                HStack(spacing: 4) {
+                    if toolCall.isActive {
+                        ProgressView()
+                            .scaleEffect(0.3)
+                            .frame(width: 8, height: 8)
+                    } else {
+                        // Show input/output tokens with arrows for Claude Code
+                        if settings.showNotchTokenBreakdown,
+                           toolCall.source == .claudeCode,
+                           let input = toolCall.inputTokens,
+                           let output = toolCall.outputTokens {
+                            HStack(spacing: 2) {
+                                Image(systemName: "arrow.up")
+                                    .font(.system(size: 7, weight: .bold))
+                                    .foregroundColor(.white)
+                                Text("\(input)")
+                                    .font(.system(size: 9, weight: .medium, design: .monospaced))
+                                    .foregroundColor(.white.opacity(0.7))
+                            }
+                            HStack(spacing: 2) {
+                                Image(systemName: "arrow.down")
+                                    .font(.system(size: 7, weight: .bold))
+                                    .foregroundColor(.white)
+                                Text("\(output)")
+                                    .font(.system(size: 9, weight: .medium, design: .monospaced))
+                                    .foregroundColor(.white.opacity(0.7))
+                            }
+                        } else if settings.showNotchTokenCount, let tokens = toolCall.tokenCount {
+                            NotchPill(text: "\(tokens) t")
+                        }
+                        if settings.showNotchCost,
+                           toolCall.source == .claudeCode,
+                           let cost = toolCall.costUsd,
+                           cost > 0 {
+                            Text("$\(String(format: "%.3f", cost))")
+                                .font(.system(size: 9, weight: .medium, design: .monospaced))
+                                .foregroundColor(.orange.opacity(0.9))
+                        }
+                        NotchPill(text: toolCall.formattedDuration, mono: true)
+                    }
+                }
+                .frame(width: rightWingWidth, alignment: .trailing)
+                .padding(.trailing, 8)
+            } else {
+                Spacer()
+                    .frame(width: rightWingWidth)
+                    .padding(.trailing, 8)
+            }
+        }
+        .frame(width: totalWidth)
+    }
+
+    @ViewBuilder
+    private var openHeader: some View {
+        HStack(spacing: 12) {
+            VStack(alignment: .leading, spacing: 2) {
+                Text("AgentNotch")
+                    .font(.system(size: 13, weight: .semibold))
+                    .foregroundColor(.white)
+
+                HStack(spacing: 6) {
+                    TelemetryStatusIndicatorView(state: telemetryCoordinator.state)
+                    Text(telemetryCoordinator.state.displayText)
+                        .font(.system(size: 10))
+                        .foregroundColor(.white.opacity(0.6))
+                        .lineLimit(1)
+                }
+            }
+
+            Spacer()
+
+            HStack(spacing: 6) {
+                if telemetryCoordinator.state == .running {
+                    NotchControlButton(systemName: "stop.fill", tint: .red) {
+                        Task { await telemetryCoordinator.stop() }
+                    }
+                } else if telemetryCoordinator.state == .stopped {
+                    NotchControlButton(systemName: "play.fill", tint: .green) {
+                        Task { await telemetryCoordinator.start() }
+                    }
+                }
+
+                NotchControlButton(systemName: "gearshape") {
+                    openSettings()
+                }
+
+                NotchControlButton(systemName: "power", tint: .red) {
+                    NSApp.terminate(nil)
+                }
+            }
+            .padding(4)
+            .background(.ultraThinMaterial, in: Capsule())
+            .overlay(
+                Capsule()
+                    .stroke(Color.white.opacity(0.12))
+            )
+        }
+        .padding(.horizontal, 16)
+    }
+
+    @ViewBuilder
+    private var expandedContent: some View {
+        VStack(spacing: 12) {
+            if shouldShowMemeVideo, let memeVideoURL {
+                NotchSection(title: "Meme Mode") {
+                    MemeVideoPlayerView(url: memeVideoURL)
+                }
+            }
+
+            if !shouldShowMemeVideo {
+                NotchSection(title: "Recent Tools") {
+                    ToolCallListView(toolCalls: Array(visibleToolCalls.prefix(6)))
+                }
+            }
+
+            Spacer(minLength: 0)
+
+            NotchFooterView(
+                sessionDuration: Date().timeIntervalSince(sessionStart),
+                tokenTotal: recentTokenTotal,
+                cacheTokens: telemetryCoordinator.sessionCacheTokens,
+                showTokenCount: settings.showNotchTokenCount
+            )
+        }
+        .padding(.horizontal, 14)
+        .padding(.top, 6)
+        .padding(.bottom, 8)
+    }
+
+    @ViewBuilder
+    private var peekHeader: some View {
+        Group {
+            if showCompletionNotice, let toolCall = completionToolCall {
+                completionHeader(toolCall: toolCall)
+            } else {
+                HStack(spacing: 10) {
+                    TelemetryStatusIndicatorView(state: telemetryCoordinator.state)
+                    Text("Telemetry Active")
+                        .font(.system(size: 13, weight: .semibold))
+                        .foregroundColor(.white)
+
+                    Spacer()
+                }
+                .padding(.horizontal, 16)
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var peekContent: some View {
+        Group {
+            if showCompletionNotice, let toolCall = completionToolCall {
+                completionContent(toolCall: toolCall)
+            } else {
+                VStack(spacing: 8) {
+                    if settings.showNotchTokenCount, recentTokenTotal > 0 {
+                        HStack(spacing: 6) {
+                            Image(systemName: "sparkles")
+                                .font(.system(size: 12))
+                                .foregroundColor(.white.opacity(0.6))
+
+                            Text("\(recentTokenTotal) t")
+                                .font(.system(size: 14, weight: .medium, design: .monospaced))
+                                .foregroundColor(.white)
+
+                            Spacer()
+                        }
+                    }
+                }
+                .padding(.horizontal, 16)
+                .padding(.top, 8)
+            }
+        }
+    }
+
+    private struct NotchSection<Content: View>: View {
+        let title: String?
+        let content: Content
+
+        init(title: String? = nil, @ViewBuilder content: () -> Content) {
+            self.title = title
+            self.content = content()
+        }
+
+        var body: some View {
+            VStack(alignment: .leading, spacing: 8) {
+                if let title {
+                    Text(title)
+                        .font(.system(size: 11, weight: .medium))
+                        .foregroundColor(.white.opacity(0.55))
+                }
+
+                content
+            }
+            .padding(10)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+            .overlay(
+                RoundedRectangle(cornerRadius: 10, style: .continuous)
+                    .stroke(Color.white.opacity(0.08))
+            )
+        }
+    }
+
+    private struct NotchControlButton: View {
+        let systemName: String
+        var tint: Color? = nil
+        let action: () -> Void
+
+        var body: some View {
+            Button(action: action) {
+                Image(systemName: systemName)
+                    .font(.system(size: 10, weight: .semibold))
+            }
+            .buttonStyle(.plain)
+            .foregroundColor(tint ?? .white.opacity(0.75))
+            .padding(6)
+            .background(
+                Circle()
+                    .fill(Color.white.opacity(0.08))
+            )
+        }
+    }
+
+    private struct NotchPill: View {
+        let text: String
+        var mono: Bool = false
+
+        var body: some View {
+            Text(text)
+                .font(.system(size: 9, weight: .medium, design: mono ? .monospaced : .default))
+                .foregroundColor(.white.opacity(0.7))
+                .padding(.horizontal, 6)
+                .padding(.vertical, 2)
+                .background(Color.white.opacity(0.08), in: Capsule())
+        }
+    }
+
+    private struct NotchFooterView: View {
+        let sessionDuration: TimeInterval
+        let tokenTotal: Int
+        let cacheTokens: Int
+        let showTokenCount: Bool
+
+        var body: some View {
+            TimelineView(.periodic(from: .now, by: 5)) { _ in
+                HStack(spacing: 8) {
+                    Image(systemName: "clock")
+                        .font(.system(size: 10, weight: .semibold))
+                        .foregroundColor(.white.opacity(0.6))
+
+                    Text(formatDuration(sessionDuration))
+                        .font(.system(size: 10, weight: .medium, design: .monospaced))
+                        .foregroundColor(.white.opacity(0.8))
+
+                    Spacer()
+
+                    if showTokenCount {
+                        // Regular tokens
+                        Image(systemName: "sparkles")
+                            .font(.system(size: 10, weight: .semibold))
+                            .foregroundColor(.white.opacity(0.6))
+
+                        Text(tokenTotal > 0 ? formatTokens(tokenTotal) : "-")
+                            .font(.system(size: 10, weight: .medium, design: .monospaced))
+                            .foregroundColor(.white.opacity(0.8))
+
+                        // Cache tokens (if any)
+                        if cacheTokens > 0 {
+                            Image(systemName: "arrow.triangle.2.circlepath")
+                                .font(.system(size: 9, weight: .semibold))
+                                .foregroundColor(.green.opacity(0.7))
+
+                            Text(formatTokens(cacheTokens))
+                                .font(.system(size: 10, weight: .medium, design: .monospaced))
+                                .foregroundColor(.green.opacity(0.8))
+                        }
+                    }
+                }
+                .padding(.horizontal, 10)
+                .padding(.vertical, 6)
+                .background(Color.white.opacity(0.06), in: Capsule())
+            }
+        }
+
+        private func formatTokens(_ count: Int) -> String {
+            if count >= 1000 {
+                return String(format: "%.1fk", Double(count) / 1000.0)
+            }
+            return "\(count)"
+        }
+
+        private func formatDuration(_ duration: TimeInterval) -> String {
+            let totalSeconds = Int(duration)
+            if totalSeconds < 60 {
+                return "\(totalSeconds)s"
+            } else if totalSeconds < 3600 {
+                let minutes = totalSeconds / 60
+                let seconds = totalSeconds % 60
+                return String(format: "%dm %02ds", minutes, seconds)
+            } else {
+                let hours = totalSeconds / 3600
+                let minutes = (totalSeconds % 3600) / 60
+                return String(format: "%dh %02dm", hours, minutes)
+            }
+        }
+    }
+
+    private func handleHover(_ hovering: Bool) {
+        hoverTask?.cancel()
+
+        if hovering {
+            withAnimation(animationSpring) {
+                isHovering = true
+            }
+
+            guard notchVM.notchState == .closed else { return }
+
+            hoverTask = Task {
+                try? await Task.sleep(for: .milliseconds(300))
+                guard !Task.isCancelled else { return }
+
+                await MainActor.run {
+                    guard notchVM.notchState == .closed, isHovering else { return }
+                    notchVM.open()
+                }
+            }
+        } else {
+            hoverTask = Task {
+                try? await Task.sleep(for: .milliseconds(150))
+                guard !Task.isCancelled else { return }
+
+                await MainActor.run {
+                    withAnimation(animationSpring) {
+                        isHovering = false
+                    }
+
+                    if notchVM.notchState == .open {
+                        notchVM.close()
+                    }
+                }
+            }
+        }
+    }
+
+    private func updateMemeAutoOpen(isActive: Bool) {
+        memeAutoOpenTask?.cancel()
+        guard settings.showMemeVideo, isActive else { return }
+        memeAutoOpenTask = Task {
+            try? await Task.sleep(for: .seconds(10))
+            guard !Task.isCancelled else { return }
+            await MainActor.run {
+                guard settings.showMemeVideo,
+                      hasActiveToolCall,
+                      notchVM.notchState == .closed else { return }
+                notchVM.open()
+            }
+        }
+    }
+
+    private func updateMemeGrace(isActive: Bool) {
+        memeGraceTask?.cancel()
+
+        if isActive {
+            isMemeGraceActive = true
+            return
+        }
+
+        guard settings.showMemeVideo else {
+            isMemeGraceActive = false
+            return
+        }
+
+        isMemeGraceActive = true
+        memeGraceTask = Task {
+            let graceSeconds = max(0, settings.memeGraceSeconds)
+            try? await Task.sleep(for: .seconds(graceSeconds))
+            guard !Task.isCancelled else { return }
+            await MainActor.run {
+                if !hasActiveToolCall {
+                    isMemeGraceActive = false
+                }
+            }
+        }
+    }
+
+    private func triggerActivityGlow() {
+        // Show glow immediately (only if not already showing)
+        if !showActivityGlow {
+            showActivityGlow = true
+        }
+
+        // Cancel previous hide timer and restart
+        // Glow will hide only after 4 seconds of NO new events AND no active tools
+        glowTask?.cancel()
+        glowTask = Task {
+            try? await Task.sleep(for: .seconds(4))
+            guard !Task.isCancelled else { return }
+            await MainActor.run {
+                // Keep glow visible while any tool is still active
+                let hasActiveTool = visibleToolCalls.contains { $0.isActive }
+                guard !hasActiveTool else { return }
+                withAnimation(.easeOut(duration: 0.5)) {
+                    showActivityGlow = false
+                }
+            }
+        }
+    }
+
+    private func triggerErrorGlow() {
+        // Show error glow immediately
+        showErrorGlow = true
+        // Stop activity glow when showing error
+        showActivityGlow = false
+        glowTask?.cancel()
+
+        // Cancel previous error hide timer and restart
+        // Error glow hides after 5 seconds
+        errorGlowTask?.cancel()
+        errorGlowTask = Task {
+            try? await Task.sleep(for: .seconds(5))
+            guard !Task.isCancelled else { return }
+            await MainActor.run {
+                withAnimation(.easeOut(duration: 0.5)) {
+                    showErrorGlow = false
+                }
+            }
+        }
+    }
+
+    private func stopAllGlows() {
+        glowTask?.cancel()
+        errorGlowTask?.cancel()
+        withAnimation(.easeOut(duration: 0.3)) {
+            showActivityGlow = false
+            showErrorGlow = false
+        }
+    }
+
+    private func scheduleClear() {
+        clearTask?.cancel()
+        clearTask = Task {
+            // Clear after 30 seconds of inactivity
+            try? await Task.sleep(for: .seconds(30))
+            guard !Task.isCancelled else { return }
+            await MainActor.run {
+                withAnimation(.easeOut(duration: 0.3)) {
+                    visibleToolCalls = []
+                }
+            }
+        }
+    }
+
+    private func handleToolCallUpdate() {
+        // Debounce rapid updates - coalesce multiple onChange calls into one
+        toolCallUpdateTask?.cancel()
+        toolCallUpdateTask = Task {
+            try? await Task.sleep(for: .milliseconds(50))
+            guard !Task.isCancelled else { return }
+            await MainActor.run {
+                performToolCallUpdate()
+            }
+        }
+    }
+
+    private func performToolCallUpdate() {
+        visibleToolCalls = telemetryCoordinator.recentToolCalls.filter { isSourceVisible($0.source) }
+
+        // Check if the most recent completed tool call is an error
+        if let lastCall = visibleToolCalls.first,
+           !lastCall.isActive,
+           !lastCall.isSuccess {
+            triggerErrorGlow()
+        } else {
+            triggerActivityGlow()
+        }
+
+        scheduleClear()
+        updateCompletionNoticeState()
+    }
+
+    private func updateCompletionNoticeState() {
+        let hasActiveNow = visibleToolCalls.contains { $0.isActive }
+        let lastCompleted = visibleToolCalls.first(where: { !$0.isActive })
+        let isCompletionEvent = lastCompleted.map(isCompletionToolCall) ?? false
+
+        if hasActiveNow {
+            completionDebounceTask?.cancel()
+        } else if hadActiveToolCalls || isCompletionEvent {
+            completionDebounceTask?.cancel()
+            completionDebounceTask = Task {
+                try? await Task.sleep(for: .seconds(1))
+                guard !Task.isCancelled else { return }
+                let stillIdle = !visibleToolCalls.contains { $0.isActive }
+                guard stillIdle, let completed = lastCompleted else { return }
+                if let endTime = completed.endTime, Date().timeIntervalSince(endTime) > 10 {
+                    return
+                }
+                guard completed.id != lastCompletionId else { return }
+                await MainActor.run {
+                    showCompletionNotice = true
+                    completionToolCall = completed
+                    lastCompletionId = completed.id
+                    stopActivityGlowForCompletion()
+                    notchVM.peek(duration: 3.0)
+                    completionNoticeTask?.cancel()
+                    completionNoticeTask = Task {
+                        try? await Task.sleep(for: .seconds(3))
+                        guard !Task.isCancelled else { return }
+                        await MainActor.run {
+                            withAnimation(.easeOut(duration: 0.3)) {
+                                showCompletionNotice = false
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        hadActiveToolCalls = hasActiveNow
+    }
+
+    private func isCompletionToolCall(_ toolCall: ToolCall) -> Bool {
+        let name = toolCall.toolName.lowercased()
+        return name == "complete"
+            || name == "response complete"
+            || name == "output ready"
+            || name == "response completed"
+    }
+
+    private func completionHeader(toolCall: ToolCall) -> some View {
+        HStack(spacing: 10) {
+            let isSuccess = toolCall.isSuccess
+            Image(systemName: isSuccess ? "checkmark.circle.fill" : "xmark.circle.fill")
+                .font(.system(size: 12, weight: .semibold))
+                .foregroundColor(isSuccess ? .green : .red)
+
+            VStack(alignment: .leading, spacing: 2) {
+                Text(isSuccess ? "Task Complete" : "Task Failed")
+                    .font(.system(size: 13, weight: .semibold))
+                    .foregroundColor(.white)
+                Text("Source: \(toolCall.source.displayName)")
+                    .font(.system(size: 11, weight: .medium))
+                    .foregroundColor(sourceTint(for: toolCall.source))
+            }
+
+            Spacer()
+        }
+        .padding(.horizontal, 16)
+    }
+
+    private func sourceTint(for source: TelemetrySource) -> Color {
+        switch source {
+        case .codex:
+            return Color(red: 0.2, green: 0.45, blue: 0.9)
+        case .claudeCode:
+            return Color(red: 1.0, green: 0.55, blue: 0.2)
+        case .unknown:
+            return Color.white.opacity(0.65)
+        }
+    }
+
+    private func completionContent(toolCall: ToolCall) -> some View {
+        VStack(spacing: 8) {
+            let summary = completionSummary(for: toolCall)
+            Text(summary)
+                .font(.system(size: 12, weight: .medium))
+                .foregroundColor(.white.opacity(0.7))
+                .lineLimit(2)
+                .frame(maxWidth: .infinity, alignment: .leading)
+
+            HStack(spacing: 8) {
+                Text(toolCall.toolName)
+                    .font(.system(size: 12, weight: .medium))
+                    .foregroundColor(.white.opacity(0.9))
+                    .lineLimit(1)
+
+                Spacer()
+
+                if settings.showNotchTokenCount, let tokens = toolCall.tokenCount {
+                    NotchPill(text: "\(tokens) t")
+                }
+
+                NotchPill(text: toolCall.formattedDuration, mono: true)
+            }
+        }
+        .padding(.horizontal, 16)
+        .padding(.top, 8)
+    }
+
+    private func completionSummary(for toolCall: ToolCall) -> String {
+        if let result = toolCall.result {
+            switch result {
+            case .success(let content):
+                let trimmed = content.trimmingCharacters(in: .whitespacesAndNewlines)
+                if !trimmed.isEmpty {
+                    return trimmed
+                }
+            case .failure(let error):
+                let trimmed = error.trimmingCharacters(in: .whitespacesAndNewlines)
+                if !trimmed.isEmpty {
+                    return trimmed
+                }
+            }
+        }
+        if isCompletionToolCall(toolCall) {
+            return "Model finished response"
+        }
+        return "Finished \(toolCall.toolName)"
+    }
+
+    private func stopActivityGlowForCompletion() {
+        glowTask?.cancel()
+        showActivityGlow = false
+    }
+
+    private func triggerStartupGlow() {
+        startupGlowTask?.cancel()
+        showStartupGlow = true
+        startupGlowTask = Task {
+            try? await Task.sleep(for: .seconds(3))
+            guard !Task.isCancelled else { return }
+            await MainActor.run {
+                withAnimation(.easeOut(duration: 0.3)) {
+                    showStartupGlow = false
+                }
+            }
+        }
+    }
+
+    private func handleAgentCompletion() {
+        // Refresh visible tool calls first
+        visibleToolCalls = telemetryCoordinator.recentToolCalls.filter { isSourceVisible($0.source) }
+
+        // Find the completion tool call that was just added
+        guard let completeCall = visibleToolCalls.first(where: { $0.toolName == "Complete" }),
+              completeCall.id != lastCompletionId else { return }
+
+        showCompletionNotice = true
+        completionToolCall = completeCall
+        lastCompletionId = completeCall.id
+        stopActivityGlowForCompletion()
+
+        // Peek the notch to show completion
+        notchVM.peek(duration: 3.0)
+
+        // Hide completion notice after delay
+        completionNoticeTask?.cancel()
+        completionNoticeTask = Task {
+            try? await Task.sleep(for: .seconds(3))
+            guard !Task.isCancelled else { return }
+            await MainActor.run {
+                withAnimation(.easeOut(duration: 0.3)) {
+                    showCompletionNotice = false
+                }
+            }
+        }
+    }
+
+    private func openSettings() {
+        NSApp.sendAction(Selector(("showSettingsWindow")), to: NSApp.delegate, from: nil)
+    }
+
+    private func isSourceVisible(_ source: TelemetrySource) -> Bool {
+        switch source {
+        case .codex:
+            return settings.showSourceCodex
+        case .claudeCode:
+            return settings.showSourceClaudeCode
+        case .unknown:
+            return settings.showSourceUnknown
+        }
+    }
+}
+
+#Preview {
+    AgentNotchContentView()
+        .environmentObject(TelemetryCoordinator.shared)
+        .frame(width: 600, height: 300)
+        .background(Color.gray.opacity(0.3))
+}
