@@ -78,7 +78,22 @@ export OTEL_EXPORTER_OTLP_ENDPOINT="http://localhost:4318"
 
 ### Setup with Codex
 
-Configure Codex to send OpenTelemetry data to `localhost:4318`.
+AgentNotch listens for **OTLP/HTTP** on port **4318** by default, and currently decodes **OTLP logs** (`/v1/logs`) and **metrics** (`/v1/metrics`).
+
+Codex CLI (v0.79+) uses `~/.codex/config.toml` with an `[otel]` section (not `[telemetry]`). Add:
+
+```toml
+[analytics]
+enabled = true
+
+[otel]
+# AgentNotch currently does not decode OTLP traces, so disable trace export to avoid noisy errors.
+trace_exporter = "none"
+
+[otel.exporter.otlp-http]
+endpoint = "http://localhost:4318/v1/logs"
+protocol = "binary"
+```
 
 ### Using the App
 

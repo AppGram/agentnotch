@@ -67,6 +67,7 @@ private final class HTTPConnectionHandler {
     private var contentLength: Int = 0
     private var route: OTLPHTTPServer.Route = .other
     private var contentEncoding: String?
+    private var didFinish = false
 
     init(
         connection: NWConnection,
@@ -124,11 +125,12 @@ private final class HTTPConnectionHandler {
         buffer.removeSubrange(0..<contentLength)
         let decodedBody = decodeBodyIfNeeded(body)
         onRequest(.init(route: route, body: decodedBody))
-        sendResponse(status: 200)
-        finish()
+        sendResponseAndFinish(status: 200)
     }
 
     private func finish() {
+        guard !didFinish else { return }
+        didFinish = true
         connection.cancel()
         onComplete(self)
     }
@@ -155,9 +157,14 @@ private final class HTTPConnectionHandler {
         }
     }
 
-    private func sendResponse(status: Int) {
-        let response = "HTTP/1.1 \(status) OK\r\nContent-Length: 0\r\n\r\n"
-        connection.send(content: response.data(using: .utf8), completion: .contentProcessed { _ in })
+    private func sendResponseAndFinish(status: Int) {
+        let response = "HTTP/1.1 \(status) OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+        connection.send(content: response.data(using: .utf8), completion: .contentProcessed { [weak self] error in
+            if let error {
+                self?.onError("OTLP HTTP send error: \(error)")
+            }
+            self?.finish()
+        })
     }
 
     private func decodeBodyIfNeeded(_ data: Data) -> Data {
