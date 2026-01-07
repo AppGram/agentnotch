@@ -4,6 +4,7 @@ struct AgentNotchContentView: View {
     @EnvironmentObject var telemetryCoordinator: TelemetryCoordinator
     @StateObject private var notchVM = NotchViewModel()
     @StateObject private var settings = AppSettings.shared
+    @StateObject private var claudeCodeManager = ClaudeCodeManager.shared
     @State private var isHovering = false
     @State private var hoverTask: Task<Void, Never>?
     @State private var sessionStart = Date()
@@ -16,6 +17,8 @@ struct AgentNotchContentView: View {
     @State private var showErrorGlow = false
     @State private var errorGlowTask: Task<Void, Never>?
     @State private var showCompletionNotice = false
+    @State private var showPermissionNotice = false
+    @State private var permissionToolName: String?
     @State private var completionNoticeTask: Task<Void, Never>?
     @State private var completionDebounceTask: Task<Void, Never>?
     @State private var lastCompletionId: UUID?
@@ -144,14 +147,14 @@ struct AgentNotchContentView: View {
                             glowColor: errorGlowColor,
                             brightColor: errorBrightColor
                         )
-                    } else if (showActivityGlow || (telemetryCoordinator.isAgentActive && hasActiveToolCall))
+                    } else if (showActivityGlow || (telemetryCoordinator.isAgentActive && hasActiveToolCall) || claudeCodeManager.hasAnySessionActivity)
                                 && notchVM.notchState == .closed
                                 && !showCompletionNotice {
                         NotchGlowBorder(
                             topCornerRadius: topCornerRadius,
                             bottomCornerRadius: bottomCornerRadius,
-                            glowColor: activityGlowColor,
-                            brightColor: activityBrightColor
+                            glowColor: claudeCodeManager.hasAnySessionActivity ? activityGlowColor : activityGlowColor,
+                            brightColor: claudeCodeManager.hasAnySessionActivity ? activityBrightColor : activityBrightColor
                         )
                     }
                 }
@@ -175,6 +178,15 @@ struct AgentNotchContentView: View {
                         // Agent just finished - trigger completion notice and stop glows
                         stopAllGlows()
                         handleAgentCompletion()
+                    }
+                }
+                .onChange(of: claudeCodeManager.sessionsNeedingPermission.count) { oldCount, newCount in
+                    if newCount > oldCount {
+                        // New permission request - show dropdown
+                        triggerPermissionNotice()
+                    } else if newCount == 0 {
+                        // Permission granted/denied - hide notice
+                        showPermissionNotice = false
                     }
                 }
                 .onChange(of: hasActiveToolCall) { _, isActive in
@@ -246,94 +258,200 @@ struct AgentNotchContentView: View {
 
     @ViewBuilder
     private var closedHeader: some View {
-        let lastCall = visibleToolCalls.first
-        // Calculate left wing width: status indicator (~14px) + spacing (6px) + text (~9px per char), max 18 chars
-        let toolNameWidth: CGFloat = lastCall.map { CGFloat(min($0.toolName.count, 18)) * 9 } ?? 0
-        let leftWingWidth: CGFloat = lastCall != nil ? 51 + toolNameWidth : 18
-        // Wider right wing for Claude Code to fit token breakdown + cost
-        let hasClaudeTokens = settings.showNotchTokenBreakdown
-            && lastCall?.source == .claudeCode
-            && lastCall?.inputTokens != nil
-        let hasClaudeCost = settings.showNotchCost
-            && lastCall?.source == .claudeCode
-            && (lastCall?.costUsd ?? 0) > 0
-        let rightWingWidth: CGFloat = lastCall != nil
-            ? (hasClaudeTokens || hasClaudeCost ? 150 : 92)
-            : 18
+        // Claude Code active tool (from JSONL parsing) - check all sessions
+        let claudeActiveTool = claudeCodeManager.state.activeTools.first
+            ?? claudeCodeManager.sessionStates.values.compactMap { $0.activeTools.first }.first
+        // Recent completed Claude tool (within last 5 seconds)
+        let recentClaudeTool: ClaudeToolExecution? = {
+            if let recent = claudeCodeManager.state.recentTools.first,
+               let endTime = recent.endTime,
+               Date().timeIntervalSince(endTime) < 5.0 {
+                return recent
+            }
+            return nil
+        }()
+        let isClaudeActive = claudeCodeManager.hasAnySessionActivity
+        let isSessionIdle = claudeCodeManager.state.isSessionComplete && !isClaudeActive
+
+        // Check if we have sessions (for context indicator)
+        let hasSessions = settings.showSessionDots
+            && settings.enableClaudeCodeJSONL
+            && !claudeCodeManager.availableSessions.isEmpty
+        let hasActiveSessionDots = hasSessions
+            && claudeCodeManager.sessionStates.values.contains { $0.isActive || $0.needsPermission }
+        let hasPermissionNeeded = settings.showPermissionIndicator && !claudeCodeManager.sessionsNeedingPermission.isEmpty
+
+        // Determine what tool to show (prefer active, then recent Claude tool)
+        let currentTool: ClaudeToolExecution? = claudeActiveTool ?? recentClaudeTool
+        let isThinking = isClaudeActive && currentTool == nil
+
+        // Determine what to show in left wing (show sessions indicator even when idle for context)
+        let showLeftWing = currentTool != nil || isThinking || hasSessions || isSessionIdle
+
+        // Calculate wing widths (tool name up to 24 chars)
+        let toolNameWidth: CGFloat = currentTool.map { CGFloat(min($0.toolName.count, 24)) * 8 } ?? 0
+        let thinkingWidth: CGFloat = 90 // Width for "Thinking..." text
+        let leftWingWidth: CGFloat = showLeftWing
+            ? (currentTool != nil ? 51 + toolNameWidth : (isThinking ? 51 + thinkingWidth : (hasSessions ? 70 : 60)))
+            : 0
+
+        let rightWingWidth: CGFloat = (currentTool != nil || isThinking) ? 120
+            : (hasPermissionNeeded ? 100 : 0)
+
+        // If nothing to show, just return the notch width
+        let hasAnyContent = showLeftWing || rightWingWidth > 0
         let totalWidth = notchVM.closedNotchSize.width + leftWingWidth + rightWingWidth
 
-        HStack(spacing: 0) {
-            // Left wing - source indicator (+ tool name if available)
-            HStack(spacing: 6) {
-                SourceIndicatorView(source: telemetryCoordinator.telemetrySource, isActive: telemetryCoordinator.isAgentActive)
-                if let toolCall = lastCall {
-                    Text(toolCall.toolName)
-                        .font(.system(size: 10, weight: .medium))
-                        .foregroundColor(.white.opacity(0.85))
-                        .lineLimit(1)
-                        .truncationMode(.tail)
-                        .padding(.horizontal, 6)
-                        .padding(.vertical, 2)
-                        .background(Color.white.opacity(0.08), in: Capsule())
-                }
-            }
-            .frame(width: leftWingWidth, alignment: .leading)
-            .padding(.leading, 8)
-
+        if !hasAnyContent {
+            // Empty state - just the notch, no wings
             Spacer()
+                .frame(width: notchVM.closedNotchSize.width)
+        } else {
+            HStack(spacing: 0) {
+                // Left wing
+                if showLeftWing {
+                    HStack(spacing: 6) {
+                        if hasSessions && currentTool == nil && !isThinking && !isSessionIdle {
+                            // Show session count indicator when idle
+                            let sessionCount = claudeCodeManager.availableSessions.count
+                            let hasActivity = hasActiveSessionDots
+                            Circle()
+                                .fill(hasActivity ? activityGlowColor : Color.gray)
+                                .frame(width: 6, height: 6)
+                                .opacity(hasActivity ? 1.0 : 0.5)
+                            Text("\(sessionCount) session\(sessionCount == 1 ? "" : "s")")
+                                .font(.system(size: 9, weight: .medium))
+                                .foregroundColor(hasActivity ? .white.opacity(0.8) : .gray)
+                        } else if isSessionIdle {
+                            // Session complete indicator
+                            Circle()
+                                .fill(Color.green)
+                                .frame(width: 8, height: 8)
+                                .shadow(color: Color.green.opacity(0.5), radius: 2)
+                            Text("Done")
+                                .font(.system(size: 10, weight: .medium))
+                                .foregroundColor(.green.opacity(0.9))
+                        } else if currentTool != nil || isThinking {
+                            // Claude orange indicator - only when active
+                            Circle()
+                                .fill(activityGlowColor)
+                                .frame(width: 8, height: 8)
+                                .shadow(color: activityGlowColor.opacity(isClaudeActive ? 0.6 : 0.3), radius: isClaudeActive ? 3 : 1)
 
-            // Right wing - spinner or duration/tokens (only when tool call exists)
-            if let toolCall = lastCall {
-                HStack(spacing: 4) {
-                    if toolCall.isActive {
-                        ProgressView()
-                            .scaleEffect(0.3)
-                            .frame(width: 8, height: 8)
-                    } else {
-                        // Show input/output tokens with arrows for Claude Code
-                        if settings.showNotchTokenBreakdown,
-                           toolCall.source == .claudeCode,
-                           let input = toolCall.inputTokens,
-                           let output = toolCall.outputTokens {
-                            HStack(spacing: 2) {
-                                Image(systemName: "arrow.up")
-                                    .font(.system(size: 7, weight: .bold))
-                                    .foregroundColor(.white)
-                                Text("\(input)")
-                                    .font(.system(size: 9, weight: .medium, design: .monospaced))
+                            if let tool = currentTool {
+                                Text(tool.toolName)
+                                    .font(.system(size: 10, weight: .medium))
+                                    .foregroundColor(.white.opacity(0.85))
+                                    .lineLimit(1)
+                                    .truncationMode(.tail)
+                                    .padding(.horizontal, 6)
+                                    .padding(.vertical, 2)
+                                    .background(Color.white.opacity(0.08), in: Capsule())
+                            } else if isThinking {
+                                Text("Thinking...")
+                                    .font(.system(size: 10, weight: .medium))
                                     .foregroundColor(.white.opacity(0.7))
+                                    .lineLimit(1)
+                                    .padding(.horizontal, 6)
+                                    .padding(.vertical, 2)
+                                    .background(Color.white.opacity(0.08), in: Capsule())
                             }
-                            HStack(spacing: 2) {
-                                Image(systemName: "arrow.down")
-                                    .font(.system(size: 7, weight: .bold))
-                                    .foregroundColor(.white)
-                                Text("\(output)")
-                                    .font(.system(size: 9, weight: .medium, design: .monospaced))
-                                    .foregroundColor(.white.opacity(0.7))
-                            }
-                        } else if settings.showNotchTokenCount, let tokens = toolCall.tokenCount {
-                            NotchPill(text: "\(tokens) t")
                         }
-                        if settings.showNotchCost,
-                           toolCall.source == .claudeCode,
-                           let cost = toolCall.costUsd,
-                           cost > 0 {
-                            Text("$\(String(format: "%.3f", cost))")
-                                .font(.system(size: 9, weight: .medium, design: .monospaced))
-                                .foregroundColor(.orange.opacity(0.9))
-                        }
-                        NotchPill(text: toolCall.formattedDuration, mono: true)
                     }
+                    .frame(width: leftWingWidth, alignment: .leading)
+                    .padding(.leading, 8)
                 }
-                .frame(width: rightWingWidth, alignment: .trailing)
-                .padding(.trailing, 8)
-            } else {
+
                 Spacer()
-                    .frame(width: rightWingWidth)
+
+                // Right wing - tool info or status
+                if rightWingWidth > 0 {
+                    Group {
+                        if let tool = currentTool {
+                            HStack(spacing: 4) {
+                                if tool.isRunning {
+                                    ProgressView()
+                                        .scaleEffect(0.3)
+                                        .frame(width: 8, height: 8)
+                                    if let desc = tool.description {
+                                        Text(desc.prefix(20))
+                                            .font(.system(size: 9))
+                                            .foregroundColor(.white.opacity(0.5))
+                                            .lineLimit(1)
+                                    }
+                                } else {
+                                    if let input = tool.inputTokens, input > 0 {
+                                        HStack(spacing: 1) {
+                                            Image(systemName: "arrow.up")
+                                                .font(.system(size: 6, weight: .bold))
+                                                .foregroundColor(.green.opacity(0.8))
+                                            Text(formatTokenCount(input))
+                                                .font(.system(size: 9, design: .monospaced))
+                                                .foregroundColor(.white.opacity(0.7))
+                                        }
+                                    }
+                                    if let output = tool.outputTokens, output > 0 {
+                                        HStack(spacing: 1) {
+                                            Image(systemName: "arrow.down")
+                                                .font(.system(size: 6, weight: .bold))
+                                                .foregroundColor(.blue.opacity(0.8))
+                                            Text(formatTokenCount(output))
+                                                .font(.system(size: 9, design: .monospaced))
+                                                .foregroundColor(.white.opacity(0.7))
+                                        }
+                                    }
+                                    Text(tool.formattedDuration)
+                                        .font(.system(size: 9, design: .monospaced))
+                                        .foregroundColor(.white.opacity(0.6))
+                                }
+                            }
+                        } else if isThinking {
+                            HStack(spacing: 4) {
+                                ProgressView()
+                                    .scaleEffect(0.3)
+                                    .frame(width: 8, height: 8)
+                                if let modelName = extractModelName(claudeCodeManager.state.model) {
+                                    Text(modelName)
+                                        .font(.system(size: 9, weight: .medium))
+                                        .foregroundColor(.white.opacity(0.5))
+                                }
+                            }
+                        } else if hasPermissionNeeded {
+                            HStack(spacing: 4) {
+                                PermissionNeededIndicatorCompact()
+                                Text("Needs OK")
+                                    .font(.system(size: 9, weight: .medium))
+                                    .foregroundColor(.orange)
+                            }
+                        }
+                    }
+                    .frame(width: rightWingWidth, alignment: .trailing)
                     .padding(.trailing, 8)
+                }
             }
+            .frame(width: totalWidth)
         }
-        .frame(width: totalWidth)
+    }
+
+    private func formatTokenCount(_ count: Int) -> String {
+        if count >= 1000 {
+            return String(format: "%.1fk", Double(count) / 1000.0)
+        }
+        return "\(count)"
+    }
+
+    /// Extract model name from full model ID (e.g., "opus" from "claude-opus-4-5-20251101")
+    private func extractModelName(_ modelId: String) -> String? {
+        let parts = modelId.lowercased().split(separator: "-")
+        // Look for known model names
+        if parts.contains("opus") { return "Opus" }
+        if parts.contains("sonnet") { return "Sonnet" }
+        if parts.contains("haiku") { return "Haiku" }
+        // Fallback: return second part if available (usually the model name)
+        if parts.count > 1 {
+            return String(parts[1]).capitalized
+        }
+        return nil
     }
 
     @ViewBuilder
@@ -386,7 +504,7 @@ struct AgentNotchContentView: View {
 
     @ViewBuilder
     private var expandedContent: some View {
-        VStack(spacing: 12) {
+        VStack(spacing: 6) {
             if shouldShowMemeVideo, let memeVideoURL {
                 NotchSection(title: "Meme Mode") {
                     MemeVideoPlayerView(url: memeVideoURL)
@@ -394,18 +512,72 @@ struct AgentNotchContentView: View {
             }
 
             if !shouldShowMemeVideo {
-                NotchSection(title: "Recent Tools") {
-                    ToolCallListView(toolCalls: Array(visibleToolCalls.prefix(6)))
+                // Show todo list if enabled and has items
+                if settings.showTodoList && !claudeCodeManager.state.todos.isEmpty {
+                    NotchSection(title: "Current Tasks") {
+                        TodoListView(todos: claudeCodeManager.state.todos, maxItems: 4)
+                    }
+                }
+
+                // Show Claude Code tools based on display mode
+                let claudeTools = claudeCodeManager.state.activeTools + claudeCodeManager.state.recentTools
+                if settings.toolDisplayMode == "singular" {
+                    // Singular mode: show one detailed event
+                    if let currentTool = claudeTools.first {
+                        NotchSection(title: currentTool.isRunning ? "Active Tool" : "Last Tool") {
+                            SingularToolDetailView(tool: currentTool, tokenUsage: claudeCodeManager.state.tokenUsage)
+                        }
+                    } else if let lastCall = visibleToolCalls.first {
+                        NotchSection(title: lastCall.isActive ? "Active Tool" : "Last Tool") {
+                            SingularTelemetryToolView(toolCall: lastCall)
+                        }
+                    }
+                } else {
+                    // List mode: show recent events list
+                    if !claudeTools.isEmpty {
+                        NotchSection(title: "Recent Tools") {
+                            ClaudeToolListView(tools: claudeTools, maxItems: 4)
+                        }
+                    } else {
+                        NotchSection(title: "Recent Tools") {
+                            ToolCallListView(toolCalls: Array(visibleToolCalls.prefix(4)))
+                        }
+                    }
                 }
             }
 
             Spacer(minLength: 0)
 
+            // Permission badge above footer
+            if settings.showPermissionIndicator && !claudeCodeManager.sessionsNeedingPermission.isEmpty {
+                PermissionNeededBadge(toolName: claudeCodeManager.state.pendingPermissionTool)
+                    .onTapGesture {
+                        claudeCodeManager.focusIDE()
+                    }
+            }
+
+            // Context progress bar
+            if settings.showContextProgress {
+                ContextProgressBar(
+                    tokenUsage: claudeCodeManager.state.tokenUsage,
+                    contextLimit: settings.contextTokenLimit
+                )
+            }
+
+            // Use Claude Code tokens when JSONL is source, otherwise use telemetry
+            let claudeTokens = claudeCodeManager.state.tokenUsage
+            let hasClaudeTokens = claudeTokens.inputTokens > 0 || claudeTokens.outputTokens > 0
+            let displayTokenTotal = hasClaudeTokens ? (claudeTokens.inputTokens + claudeTokens.outputTokens) : recentTokenTotal
+            let displayCacheTokens = hasClaudeTokens ? claudeTokens.cacheReadInputTokens : telemetryCoordinator.sessionCacheTokens
+            let displayCacheWriteTokens = hasClaudeTokens ? claudeTokens.cacheCreationInputTokens : 0
+
             NotchFooterView(
                 sessionDuration: Date().timeIntervalSince(sessionStart),
-                tokenTotal: recentTokenTotal,
-                cacheTokens: telemetryCoordinator.sessionCacheTokens,
-                showTokenCount: settings.showNotchTokenCount
+                tokenTotal: displayTokenTotal,
+                cacheReadTokens: displayCacheTokens,
+                cacheWriteTokens: displayCacheWriteTokens,
+                showTokenCount: settings.showNotchTokenCount,
+                gitBranch: claudeCodeManager.state.gitBranch
             )
         }
         .padding(.horizontal, 14)
@@ -435,7 +607,9 @@ struct AgentNotchContentView: View {
     @ViewBuilder
     private var peekContent: some View {
         Group {
-            if showCompletionNotice, let toolCall = completionToolCall {
+            if showPermissionNotice {
+                permissionContent
+            } else if showCompletionNotice, let toolCall = completionToolCall {
                 completionContent(toolCall: toolCall)
             } else {
                 VStack(spacing: 8) {
@@ -456,6 +630,44 @@ struct AgentNotchContentView: View {
                 .padding(.horizontal, 16)
                 .padding(.top, 8)
             }
+        }
+    }
+
+    private var permissionContent: some View {
+        VStack(spacing: 8) {
+            HStack(spacing: 10) {
+                // Pulsing orange indicator
+                Circle()
+                    .fill(Color.orange)
+                    .frame(width: 12, height: 12)
+                    .shadow(color: .orange.opacity(0.6), radius: 4)
+
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Permission Required")
+                        .font(.system(size: 13, weight: .semibold))
+                        .foregroundColor(.white)
+
+                    if let toolName = permissionToolName {
+                        Text("Claude wants to run: \(toolName)")
+                            .font(.system(size: 11))
+                            .foregroundColor(.white.opacity(0.7))
+                    }
+                }
+
+                Spacer()
+
+                Text("Check Terminal")
+                    .font(.system(size: 10, weight: .medium))
+                    .foregroundColor(.orange)
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 4)
+                    .background(Color.orange.opacity(0.2), in: Capsule())
+            }
+        }
+        .padding(.horizontal, 16)
+        .padding(.top, 10)
+        .onTapGesture {
+            claudeCodeManager.focusIDE()
         }
     }
 
@@ -525,8 +737,10 @@ struct AgentNotchContentView: View {
     private struct NotchFooterView: View {
         let sessionDuration: TimeInterval
         let tokenTotal: Int
-        let cacheTokens: Int
+        let cacheReadTokens: Int
+        let cacheWriteTokens: Int
         let showTokenCount: Bool
+        let gitBranch: String?
 
         var body: some View {
             TimelineView(.periodic(from: .now, by: 5)) { _ in
@@ -539,10 +753,26 @@ struct AgentNotchContentView: View {
                         .font(.system(size: 10, weight: .medium, design: .monospaced))
                         .foregroundColor(.white.opacity(0.8))
 
+                    // Git branch badge
+                    if let branch = gitBranch, !branch.isEmpty {
+                        HStack(spacing: 3) {
+                            Image(systemName: "arrow.triangle.branch")
+                                .font(.system(size: 8, weight: .semibold))
+                                .foregroundColor(.purple.opacity(0.8))
+                            Text(branch)
+                                .font(.system(size: 9, weight: .medium))
+                                .foregroundColor(.purple.opacity(0.9))
+                                .lineLimit(1)
+                        }
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 2)
+                        .background(Color.purple.opacity(0.15), in: Capsule())
+                    }
+
                     Spacer()
 
                     if showTokenCount {
-                        // Regular tokens
+                        // Regular tokens (input + output)
                         Image(systemName: "sparkles")
                             .font(.system(size: 10, weight: .semibold))
                             .foregroundColor(.white.opacity(0.6))
@@ -551,15 +781,28 @@ struct AgentNotchContentView: View {
                             .font(.system(size: 10, weight: .medium, design: .monospaced))
                             .foregroundColor(.white.opacity(0.8))
 
-                        // Cache tokens (if any)
-                        if cacheTokens > 0 {
-                            Image(systemName: "arrow.triangle.2.circlepath")
-                                .font(.system(size: 9, weight: .semibold))
-                                .foregroundColor(.green.opacity(0.7))
+                        // Cache read tokens (green - savings)
+                        if cacheReadTokens > 0 {
+                            HStack(spacing: 2) {
+                                Image(systemName: "arrow.down.circle")
+                                    .font(.system(size: 8, weight: .semibold))
+                                    .foregroundColor(.green.opacity(0.8))
+                                Text(formatTokens(cacheReadTokens))
+                                    .font(.system(size: 9, weight: .medium, design: .monospaced))
+                                    .foregroundColor(.green.opacity(0.9))
+                            }
+                        }
 
-                            Text(formatTokens(cacheTokens))
-                                .font(.system(size: 10, weight: .medium, design: .monospaced))
-                                .foregroundColor(.green.opacity(0.8))
+                        // Cache write tokens (yellow - creation)
+                        if cacheWriteTokens > 0 {
+                            HStack(spacing: 2) {
+                                Image(systemName: "arrow.up.circle")
+                                    .font(.system(size: 8, weight: .semibold))
+                                    .foregroundColor(.yellow.opacity(0.8))
+                                Text(formatTokens(cacheWriteTokens))
+                                    .font(.system(size: 9, weight: .medium, design: .monospaced))
+                                    .foregroundColor(.yellow.opacity(0.9))
+                            }
                         }
                     }
                 }
@@ -588,6 +831,279 @@ struct AgentNotchContentView: View {
                 let hours = totalSeconds / 3600
                 let minutes = (totalSeconds % 3600) / 60
                 return String(format: "%dh %02dm", hours, minutes)
+            }
+        }
+    }
+
+    // MARK: - Context Progress Bar
+
+    private struct ContextProgressBar: View {
+        let tokenUsage: ClaudeTokenUsage
+        let contextLimit: Int
+
+        private var totalTokens: Int {
+            tokenUsage.inputTokens + tokenUsage.outputTokens + tokenUsage.cacheReadInputTokens
+        }
+
+        private var progress: Double {
+            guard contextLimit > 0 else { return 0 }
+            return min(1.0, Double(totalTokens) / Double(contextLimit))
+        }
+
+        private var progressColor: Color {
+            if progress > 0.9 { return .red }
+            if progress > 0.7 { return .orange }
+            if progress > 0.5 { return .yellow }
+            return .green
+        }
+
+        var body: some View {
+            VStack(spacing: 4) {
+                HStack {
+                    Text("Context")
+                        .font(.system(size: 9, weight: .medium))
+                        .foregroundColor(.white.opacity(0.6))
+                    Spacer()
+                    Text("\(formatTokens(totalTokens)) / \(formatTokens(contextLimit))")
+                        .font(.system(size: 9, weight: .medium, design: .monospaced))
+                        .foregroundColor(.white.opacity(0.7))
+                }
+
+                GeometryReader { geo in
+                    ZStack(alignment: .leading) {
+                        // Background
+                        RoundedRectangle(cornerRadius: 3)
+                            .fill(Color.white.opacity(0.1))
+
+                        // Progress fill
+                        RoundedRectangle(cornerRadius: 3)
+                            .fill(progressColor.opacity(0.8))
+                            .frame(width: geo.size.width * progress)
+                    }
+                }
+                .frame(height: 6)
+            }
+            .padding(.horizontal, 10)
+            .padding(.vertical, 6)
+            .background(Color.white.opacity(0.04), in: RoundedRectangle(cornerRadius: 8))
+        }
+
+        private func formatTokens(_ count: Int) -> String {
+            if count >= 1000 {
+                return String(format: "%.1fk", Double(count) / 1000.0)
+            }
+            return "\(count)"
+        }
+    }
+
+    // MARK: - Singular Tool Detail View (for Claude Code tools)
+
+    private struct SingularToolDetailView: View {
+        let tool: ClaudeToolExecution
+        let tokenUsage: ClaudeTokenUsage
+
+        private let claudeColor = Color(red: 1.0, green: 0.55, blue: 0.2)
+
+        var body: some View {
+            VStack(alignment: .leading, spacing: 8) {
+                // Tool name and status
+                HStack(spacing: 8) {
+                    Circle()
+                        .fill(claudeColor)
+                        .frame(width: 10, height: 10)
+                        .shadow(color: claudeColor.opacity(tool.isRunning ? 0.6 : 0.3), radius: tool.isRunning ? 4 : 2)
+
+                    Text(tool.toolName)
+                        .font(.system(size: 14, weight: .semibold))
+                        .foregroundColor(.primary)
+
+                    Spacer()
+
+                    if tool.isRunning {
+                        ProgressView()
+                            .scaleEffect(0.5)
+                            .frame(width: 16, height: 16)
+                    } else {
+                        Text(tool.formattedDuration)
+                            .font(.system(size: 11, design: .monospaced))
+                            .foregroundColor(.secondary)
+                    }
+                }
+
+                // Description
+                if let desc = tool.description, !desc.isEmpty {
+                    Text(desc)
+                        .font(.system(size: 11))
+                        .foregroundColor(.secondary)
+                        .lineLimit(2)
+                }
+
+                // Argument/filename
+                if let arg = tool.argument, !arg.isEmpty {
+                    HStack(spacing: 4) {
+                        Image(systemName: "doc.text")
+                            .font(.system(size: 9))
+                            .foregroundColor(.secondary)
+                        Text(arg)
+                            .font(.system(size: 10, design: .monospaced))
+                            .foregroundColor(.secondary.opacity(0.8))
+                            .lineLimit(1)
+                            .truncationMode(.middle)
+                    }
+                }
+
+                Divider()
+                    .background(Color.white.opacity(0.1))
+
+                // Token details
+                HStack(spacing: 12) {
+                    // Input tokens
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Input")
+                            .font(.system(size: 8, weight: .medium))
+                            .foregroundColor(.secondary)
+                        HStack(spacing: 2) {
+                            Image(systemName: "arrow.up")
+                                .font(.system(size: 8, weight: .bold))
+                                .foregroundColor(.green.opacity(0.8))
+                            Text(formatTokens(tool.inputTokens ?? tokenUsage.inputTokens))
+                                .font(.system(size: 11, weight: .medium, design: .monospaced))
+                                .foregroundColor(.primary)
+                        }
+                    }
+
+                    // Output tokens
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Output")
+                            .font(.system(size: 8, weight: .medium))
+                            .foregroundColor(.secondary)
+                        HStack(spacing: 2) {
+                            Image(systemName: "arrow.down")
+                                .font(.system(size: 8, weight: .bold))
+                                .foregroundColor(.blue.opacity(0.8))
+                            Text(formatTokens(tool.outputTokens ?? tokenUsage.outputTokens))
+                                .font(.system(size: 11, weight: .medium, design: .monospaced))
+                                .foregroundColor(.primary)
+                        }
+                    }
+
+                    // Cache read
+                    if (tool.cacheReadTokens ?? tokenUsage.cacheReadInputTokens) > 0 {
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text("Cache")
+                                .font(.system(size: 8, weight: .medium))
+                                .foregroundColor(.secondary)
+                            HStack(spacing: 2) {
+                                Image(systemName: "arrow.triangle.2.circlepath")
+                                    .font(.system(size: 8, weight: .bold))
+                                    .foregroundColor(.green.opacity(0.8))
+                                Text(formatTokens(tool.cacheReadTokens ?? tokenUsage.cacheReadInputTokens))
+                                    .font(.system(size: 11, weight: .medium, design: .monospaced))
+                                    .foregroundColor(.green)
+                            }
+                        }
+                    }
+
+                    Spacer()
+
+                    // Timeout if present
+                    if let timeout = tool.timeout {
+                        VStack(alignment: .trailing, spacing: 2) {
+                            Text("Timeout")
+                                .font(.system(size: 8, weight: .medium))
+                                .foregroundColor(.secondary)
+                            Text("\(timeout / 1000)s")
+                                .font(.system(size: 11, weight: .medium, design: .monospaced))
+                                .foregroundColor(.secondary)
+                        }
+                    }
+                }
+            }
+        }
+
+        private func formatTokens(_ count: Int) -> String {
+            if count >= 1000 {
+                return String(format: "%.1fk", Double(count) / 1000.0)
+            }
+            return "\(count)"
+        }
+    }
+
+    // MARK: - Singular Telemetry Tool View (fallback for non-Claude tools)
+
+    private struct SingularTelemetryToolView: View {
+        let toolCall: ToolCall
+
+        private var sourceColor: Color {
+            switch toolCall.source {
+            case .codex:
+                return Color(red: 0.2, green: 0.45, blue: 0.9)
+            case .claudeCode:
+                return Color(red: 1.0, green: 0.55, blue: 0.2)
+            case .unknown:
+                return Color.gray
+            }
+        }
+
+        var body: some View {
+            VStack(alignment: .leading, spacing: 8) {
+                // Tool name and status
+                HStack(spacing: 8) {
+                    Circle()
+                        .fill(sourceColor)
+                        .frame(width: 10, height: 10)
+
+                    Text(toolCall.toolName)
+                        .font(.system(size: 14, weight: .semibold))
+                        .foregroundColor(.primary)
+
+                    Spacer()
+
+                    if toolCall.isActive {
+                        ProgressView()
+                            .scaleEffect(0.5)
+                            .frame(width: 16, height: 16)
+                    } else {
+                        Text(toolCall.formattedDuration)
+                            .font(.system(size: 11, design: .monospaced))
+                            .foregroundColor(.secondary)
+                    }
+                }
+
+                // Result or status
+                if !toolCall.isActive {
+                    HStack(spacing: 4) {
+                        Image(systemName: toolCall.isSuccess ? "checkmark.circle.fill" : "xmark.circle.fill")
+                            .font(.system(size: 10))
+                            .foregroundColor(toolCall.isSuccess ? .green : .red)
+                        Text(toolCall.isSuccess ? "Completed" : "Failed")
+                            .font(.system(size: 11))
+                            .foregroundColor(toolCall.isSuccess ? .green : .red)
+                    }
+                }
+
+                // Tokens if available
+                if let tokens = toolCall.tokenCount, tokens > 0 {
+                    HStack(spacing: 4) {
+                        Image(systemName: "sparkles")
+                            .font(.system(size: 9))
+                            .foregroundColor(.secondary)
+                        Text("\(tokens) tokens")
+                            .font(.system(size: 11, design: .monospaced))
+                            .foregroundColor(.secondary)
+                    }
+                }
+
+                // Source badge
+                HStack {
+                    Spacer()
+                    Text(toolCall.source.displayName)
+                        .font(.system(size: 9, weight: .medium))
+                        .foregroundColor(sourceColor)
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 2)
+                        .background(sourceColor.opacity(0.15), in: Capsule())
+                }
             }
         }
     }
@@ -898,6 +1414,31 @@ struct AgentNotchContentView: View {
     private func stopActivityGlowForCompletion() {
         glowTask?.cancel()
         showActivityGlow = false
+    }
+
+    private func triggerPermissionNotice() {
+        // Get the tool name from the first session needing permission
+        if let session = claudeCodeManager.sessionsNeedingPermission.first,
+           let state = claudeCodeManager.sessionStates[session.id] {
+            permissionToolName = state.pendingPermissionTool
+        } else {
+            permissionToolName = claudeCodeManager.state.pendingPermissionTool
+        }
+
+        showPermissionNotice = true
+        notchVM.peek(duration: 5.0)
+
+        // Auto-hide after duration
+        Task {
+            try? await Task.sleep(for: .seconds(5))
+            await MainActor.run {
+                if showPermissionNotice {
+                    withAnimation(.easeOut(duration: 0.3)) {
+                        showPermissionNotice = false
+                    }
+                }
+            }
+        }
     }
 
     private func triggerStartupGlow() {

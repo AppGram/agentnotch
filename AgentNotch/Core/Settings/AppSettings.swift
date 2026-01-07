@@ -30,6 +30,19 @@ public final class AppSettings: ObservableObject {
     // Battery saver: 15 FPS on battery, 25 FPS when charging
     @AppStorage("batterySaverEnabled") public var batterySaverEnabled: Bool = true
 
+    // Claude Code JSONL Session Tracking
+    @AppStorage("enableClaudeCodeJSONL") public var enableClaudeCodeJSONL: Bool = true
+    @AppStorage("showSessionDots") public var showSessionDots: Bool = true
+    @AppStorage("showPermissionIndicator") public var showPermissionIndicator: Bool = true
+    @AppStorage("showTodoList") public var showTodoList: Bool = true
+    @AppStorage("showThinkingState") public var showThinkingState: Bool = true
+
+    // Context and Display Settings
+    @AppStorage("contextTokenLimit") public var contextTokenLimit: Int = 200_000
+    @AppStorage("showContextProgress") public var showContextProgress: Bool = true
+    /// Display mode: "list" for recent events list, "singular" for single detailed event
+    @AppStorage("toolDisplayMode") public var toolDisplayMode: String = "list"
+
     public var mcpConfiguration: MCPConfiguration {
         MCPConfiguration(
             binaryPath: mcpBinaryPath,

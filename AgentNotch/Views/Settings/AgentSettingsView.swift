@@ -18,7 +18,7 @@ public struct AgentSettingsView: View {
                     Label("Telemetry", systemImage: "waveform.path.ecg")
                 }
         }
-        .frame(width: 450, height: 380)
+        .frame(width: 450, height: 520)
     }
 }
 
@@ -72,6 +72,48 @@ struct TelemetryGeneralSettingsTab: View {
                     .foregroundColor(.secondary)
             } header: {
                 Text("Performance")
+            }
+
+            Section {
+                Toggle("Enable JSONL session tracking", isOn: $settings.enableClaudeCodeJSONL)
+                Toggle("Show session dots", isOn: $settings.showSessionDots)
+                    .disabled(!settings.enableClaudeCodeJSONL)
+                Toggle("Show permission indicator", isOn: $settings.showPermissionIndicator)
+                    .disabled(!settings.enableClaudeCodeJSONL)
+                Toggle("Show todo list", isOn: $settings.showTodoList)
+                    .disabled(!settings.enableClaudeCodeJSONL)
+                Toggle("Show thinking state", isOn: $settings.showThinkingState)
+                    .disabled(!settings.enableClaudeCodeJSONL)
+
+                Divider()
+
+                Toggle("Show context progress bar", isOn: $settings.showContextProgress)
+                    .disabled(!settings.enableClaudeCodeJSONL)
+
+                Stepper(value: $settings.contextTokenLimit, in: 50_000...1_000_000, step: 50_000) {
+                    HStack {
+                        Text("Context limit")
+                        Spacer()
+                        Text("\(settings.contextTokenLimit / 1000)k")
+                            .foregroundColor(.secondary)
+                    }
+                }
+                .disabled(!settings.enableClaudeCodeJSONL)
+
+                Divider()
+
+                Picker("Tool display mode", selection: $settings.toolDisplayMode) {
+                    Text("Recent events list").tag("list")
+                    Text("Single detailed event").tag("singular")
+                }
+                .pickerStyle(.segmented)
+                .disabled(!settings.enableClaudeCodeJSONL)
+
+                Text("Reads from ~/.claude to track sessions")
+                    .font(.system(size: 11))
+                    .foregroundColor(.secondary)
+            } header: {
+                Text("Claude Code")
             }
         }
         .formStyle(.grouped)

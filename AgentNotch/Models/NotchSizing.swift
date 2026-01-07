@@ -12,7 +12,7 @@ let shadowPadding: CGFloat = 20
 let closedNotchGlowPadding: CGFloat = 24
 
 /// Open notch content size - larger for better data display
-let openNotchSize: CGSize = .init(width: 580, height: 320)
+let openNotchSize: CGSize = .init(width: 580, height: 368)
 
 /// Window size (includes shadow padding)
 let windowSize: CGSize = .init(width: openNotchSize.width, height: openNotchSize.height + shadowPadding)

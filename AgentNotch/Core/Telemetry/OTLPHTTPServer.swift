@@ -2,6 +2,7 @@ import Foundation
 import Network
 import zlib
 
+
 final class OTLPHTTPServer {
     enum Route {
         case logs
@@ -41,7 +42,7 @@ final class OTLPHTTPServer {
 
     private func handleConnection(_ connection: NWConnection) {
         let handler = HTTPConnectionHandler(connection: connection) { [weak self] request in
-            print("[OTLP] Received request: \(request.route), body size: \(request.body.count)")
+            debugLog("[OTLP] Received request: \(request.route), body size: \(request.body.count)")
             self?.onRequest?(request)
         } onError: { [weak self] message in
             self?.onError?(message)

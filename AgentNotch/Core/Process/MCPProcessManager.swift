@@ -44,7 +44,7 @@ final class MCPProcessManager {
         process.arguments = configuration.arguments
         process.currentDirectoryURL = FileManager.default.homeDirectoryForCurrentUser
 
-        print("[MCP] Launching: \(executableURL.path) \(configuration.arguments.joined(separator: " "))")
+        debugLog("[MCP] Launching: \(executableURL.path) \(configuration.arguments.joined(separator: " "))")
 
         // Setup pipes
         let inputPipe = Pipe()
@@ -71,7 +71,7 @@ final class MCPProcessManager {
             guard !data.isEmpty else { return }
             // Print stderr for debugging
             if let str = String(data: data, encoding: .utf8) {
-                print("[MCP stderr]: \(str)")
+                debugLog("[MCP stderr]: \(str)")
             }
             self?.delegate?.processManager(self!, didReceiveError: data)
         }
@@ -79,7 +79,7 @@ final class MCPProcessManager {
         // Setup termination handler
         process.terminationHandler = { [weak self] process in
             guard let self = self else { return }
-            print("[MCP] Process terminated with status: \(process.terminationStatus)")
+            debugLog("[MCP] Process terminated with status: \(process.terminationStatus)")
             self.cleanup()
             self.delegate?.processManager(self, didTerminateWithStatus: process.terminationStatus)
         }
