@@ -1,8 +1,9 @@
-<p align="center">
-  <img src="https://raw.githubusercontent.com/AppGram/agentnotch/main/icon.png" width="128" height="128" alt="AgentNotch Icon">
-</p>
 
 <h1 align="center">AgentNotch</h1>
+
+<p align="center">
+  <img src="https://raw.githubusercontent.com/AppGram/agentnotch/main/agentnotch-demo.png" alt="AgentNotch Icon">
+</p>
 
 <p align="center">
   <strong>Real-time AI coding assistant telemetry in your Mac's notch</strong>
