@@ -93,6 +93,17 @@ struct TelemetryGeneralSettingsTab: View {
             }
 
             Section {
+                Toggle("Enable usage quota tracking", isOn: $settings.enableClaudeUsage)
+                Toggle("Show in closed notch", isOn: $settings.showClaudeUsageInClosedNotch)
+                    .disabled(!settings.enableClaudeUsage)
+
+                ClaudeUsageSettingsView()
+                    .disabled(!settings.enableClaudeUsage)
+            } header: {
+                Text("Claude API Usage")
+            }
+
+            Section {
                 Toggle("Enable JSONL session tracking", isOn: $settings.enableCodexJSONL)
 
                 Text("Reads from ~/.codex/sessions to track sessions")

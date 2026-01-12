@@ -46,6 +46,12 @@ public final class AppSettings: ObservableObject {
     /// Display mode: "list" for recent events list, "singular" for single detailed event
     @AppStorage("toolDisplayMode") public var toolDisplayMode: String = "list"
 
+    // Claude Usage Quota Tracking
+    @AppStorage("enableClaudeUsage") public var enableClaudeUsage: Bool = false
+    @AppStorage("claudeUsageRefreshMode") public var claudeUsageRefreshMode: String = "smart"  // "smart" or "fixed"
+    @AppStorage("claudeUsageRefreshInterval") public var claudeUsageRefreshInterval: Int = 180  // seconds
+    @AppStorage("showClaudeUsageInClosedNotch") public var showClaudeUsageInClosedNotch: Bool = true
+
     public var mcpConfiguration: MCPConfiguration {
         MCPConfiguration(
             binaryPath: mcpBinaryPath,

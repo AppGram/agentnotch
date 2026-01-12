@@ -271,6 +271,10 @@ struct AgentNotchContentView: View {
         .preferredColorScheme(.dark)
         .onAppear {
             triggerStartupGlow()
+            // Start Claude Usage quota tracking if enabled
+            if settings.enableClaudeUsage && ClaudeUsageManager.shared.isConfigured {
+                ClaudeUsageManager.shared.startRefreshing()
+            }
         }
         .onDisappear {
             startupGlowTask?.cancel()
@@ -719,11 +723,12 @@ struct AgentNotchContentView: View {
                     }
             }
 
-            // Context progress bar
+            // Context progress bar (with integrated API usage badges)
             if settings.showContextProgress {
                 ContextProgressBar(
                     tokenUsage: claudeCodeManager.state.tokenUsage,
-                    contextLimit: settings.contextTokenLimit
+                    contextLimit: settings.contextTokenLimit,
+                    showApiUsage: settings.enableClaudeUsage
                 )
             }
 
@@ -1003,6 +1008,7 @@ struct AgentNotchContentView: View {
     private struct ContextProgressBar: View {
         let tokenUsage: ClaudeTokenUsage
         let contextLimit: Int
+        var showApiUsage: Bool = false
 
         private var totalTokens: Int {
             tokenUsage.inputTokens + tokenUsage.outputTokens + tokenUsage.cacheReadInputTokens
@@ -1026,10 +1032,17 @@ struct AgentNotchContentView: View {
                     Text("Context")
                         .font(.system(size: 9, weight: .medium))
                         .foregroundColor(.white.opacity(0.6))
-                    Spacer()
+
                     Text("\(formatTokens(totalTokens)) / \(formatTokens(contextLimit))")
                         .font(.system(size: 9, weight: .medium, design: .monospaced))
                         .foregroundColor(.white.opacity(0.7))
+
+                    Spacer()
+
+                    // API Usage badges integrated inline
+                    if showApiUsage {
+                        InlineApiUsageBadges()
+                    }
                 }
 
                 GeometryReader { geo in
