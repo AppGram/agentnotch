@@ -11,7 +11,7 @@ import Foundation
 
 /// Represents an active Claude Code IDE session from ~/.claude/ide/*.lock
 struct ClaudeSession: Identifiable, Codable, Equatable {
-    var id: String { workspaceFolders.first ?? "\(pid)" }
+    var id: String { "\(ideName):\(workspaceFolders.first ?? "\(pid)")" }
 
     let pid: Int
     let workspaceFolders: [String]

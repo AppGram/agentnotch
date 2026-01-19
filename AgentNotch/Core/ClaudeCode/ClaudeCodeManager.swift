@@ -191,8 +191,8 @@ final class ClaudeCodeManager: ObservableObject {
             debugLog("[ClaudeCode] No IDE dir - checking for terminal sessions")
         }
 
-        // If no IDE sessions, discover from recently active project JSONL files
-        if sessions.isEmpty && fm.fileExists(atPath: projectsDir.path) {
+        // Also discover from recently active project JSONL files (terminal sessions)
+        if fm.fileExists(atPath: projectsDir.path) {
             debugLog("[ClaudeCode] Scanning projects dir for active terminal sessions...")
 
             do {
