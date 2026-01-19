@@ -191,8 +191,8 @@ final class ClaudeCodeManager: ObservableObject {
             debugLog("[ClaudeCode] No IDE dir - checking for terminal sessions")
         }
 
-        // If no IDE sessions, discover from recently active project JSONL files
-        if sessions.isEmpty && fm.fileExists(atPath: projectsDir.path) {
+        // Also discover from recently active project JSONL files (terminal sessions)
+        if fm.fileExists(atPath: projectsDir.path) {
             debugLog("[ClaudeCode] Scanning projects dir for active terminal sessions...")
 
             do {
@@ -206,7 +206,9 @@ final class ClaudeCodeManager: ObservableObject {
                 let recentThreshold = Date().addingTimeInterval(-300) // 5 minutes
 
                 for projectDir in projectDirs {
-                    if let jsonlFile = findCurrentSessionFile(in: projectDir) {
+                    let jsonlFiles = findActiveSessionFiles(in: projectDir)
+
+                    for jsonlFile in jsonlFiles {
                         let attrs = try? fm.attributesOfItem(atPath: jsonlFile.path)
                         let modDate = attrs?[.modificationDate] as? Date ?? .distantPast
 
@@ -215,14 +217,17 @@ final class ClaudeCodeManager: ObservableObject {
                             let workspacePath = projectDir.lastPathComponent
                                 .replacingOccurrences(of: "-", with: "/")
 
+                            // Use sessionId from filename for unique identification
+                            let sessionId = jsonlFile.deletingPathExtension().lastPathComponent
+
                             let session = ClaudeSession(
                                 pid: 0,  // Terminal sessions don't have a single PID
-                                workspaceFolders: [workspacePath],
+                                workspaceFolders: ["\(workspacePath)#\(sessionId)"],
                                 ideName: "Terminal",
                                 transport: nil,
                                 runningInWindows: nil
                             )
-                            debugLog("[ClaudeCode] Terminal session: \(session.displayName) (modified \(Int(-modDate.timeIntervalSinceNow))s ago)")
+                            debugLog("[ClaudeCode] Terminal session: \(session.displayName) [id: \(sessionId.prefix(8))...] (modified \(Int(-modDate.timeIntervalSinceNow))s ago)")
                             sessions.append(session)
                         }
                     }
@@ -361,9 +366,22 @@ final class ClaudeCodeManager: ObservableObject {
         }
 
         let projectDir = projectsDir.appendingPathComponent(projectKey)
-        guard let jsonlFile = findCurrentSessionFile(in: projectDir) else {
-            debugLog("[ClaudeCode] No session file found for project: \(projectKey)")
-            return
+
+        // For terminal sessions, use the specific session file; for IDE, use most recent
+        let jsonlFile: URL
+        if let terminalId = session.terminalSessionId {
+            jsonlFile = projectDir.appendingPathComponent("\(terminalId).jsonl")
+            guard FileManager.default.fileExists(atPath: jsonlFile.path) else {
+                debugLog("[ClaudeCode] Session file not found: \(terminalId).jsonl")
+                return
+            }
+        } else {
+            let activeFiles = findActiveSessionFiles(in: projectDir)
+            guard let firstFile = activeFiles.first else {
+                debugLog("[ClaudeCode] No session file found for project: \(projectKey)")
+                return
+            }
+            jsonlFile = firstFile
         }
 
         debugLog("[ClaudeCode] Watching session file: \(jsonlFile.path)")
@@ -443,7 +461,16 @@ final class ClaudeCodeManager: ObservableObject {
         if let projectKey = session.projectKey {
             debugLog("[ClaudeCode]   - Project key: \(projectKey)")
             let directPath = projectsDir.appendingPathComponent(projectKey)
-            if let file = findCurrentSessionFile(in: directPath) {
+
+            // For terminal sessions, use the specific session file
+            if let terminalId = session.terminalSessionId {
+                let specificFile = directPath.appendingPathComponent("\(terminalId).jsonl")
+                if FileManager.default.fileExists(atPath: specificFile.path) {
+                    projectDir = directPath
+                    jsonlFile = specificFile
+                    debugLog("[ClaudeCode]   - Found terminal session file: \(terminalId).jsonl")
+                }
+            } else if let file = findActiveSessionFiles(in: directPath).first {
                 projectDir = directPath
                 jsonlFile = file
                 debugLog("[ClaudeCode]   - Found via direct match: \(directPath.path)")
@@ -455,9 +482,12 @@ final class ClaudeCodeManager: ObservableObject {
             debugLog("[ClaudeCode]   - Direct match failed, scanning all projects...")
             let fm = FileManager.default
 
+            // Strip session fragment for comparison
+            let cleanWorkspace = workspace.components(separatedBy: "#").first ?? workspace
+            let normalizedWorkspace = cleanWorkspace.lowercased()
+
             if let projectDirs = try? fm.contentsOfDirectory(at: projectsDir, includingPropertiesForKeys: nil) {
                 // Look for directory that matches the workspace path
-                let normalizedWorkspace = workspace.lowercased()
                 for dir in projectDirs {
                     // Convert dir name back to path: "-Users-foo-project" -> "/Users/foo/project"
                     let dirName = dir.lastPathComponent
@@ -465,7 +495,16 @@ final class ClaudeCodeManager: ObservableObject {
                     // Handle leading dash correctly (absolute paths start with /)
                     let normalizedDirPath = dirPath.hasPrefix("/") ? dirPath : "/" + dirPath
                     if normalizedDirPath.lowercased() == normalizedWorkspace {
-                        if let file = findCurrentSessionFile(in: dir) {
+                        // For terminal sessions, use the specific session file
+                        if let terminalId = session.terminalSessionId {
+                            let specificFile = dir.appendingPathComponent("\(terminalId).jsonl")
+                            if fm.fileExists(atPath: specificFile.path) {
+                                projectDir = dir
+                                jsonlFile = specificFile
+                                debugLog("[ClaudeCode]   - Found terminal session via scan: \(terminalId).jsonl")
+                                break
+                            }
+                        } else if let file = findActiveSessionFiles(in: dir).first {
                             projectDir = dir
                             jsonlFile = file
                             debugLog("[ClaudeCode]   - Found via scan: \(dir.path)")
@@ -975,17 +1014,17 @@ final class ClaudeCodeManager: ObservableObject {
         sessionsNeedingPermission = needingPermission
     }
 
-    private func findCurrentSessionFile(in projectDir: URL) -> URL? {
+    private func findActiveSessionFiles(in projectDir: URL) -> [URL] {
         let fm = FileManager.default
 
         guard fm.fileExists(atPath: projectDir.path) else {
-            debugLog("[ClaudeCode] findCurrentSessionFile: directory does not exist: \(projectDir.path)")
-            return nil
+            debugLog("[ClaudeCode] findActiveSessionFiles: directory does not exist: \(projectDir.path)")
+            return []
         }
 
         do {
             let allFiles = try fm.contentsOfDirectory(at: projectDir, includingPropertiesForKeys: [.contentModificationDateKey])
-            debugLog("[ClaudeCode] findCurrentSessionFile: \(allFiles.count) files in \(projectDir.lastPathComponent)")
+            debugLog("[ClaudeCode] findActiveSessionFiles: \(allFiles.count) files in \(projectDir.lastPathComponent)")
 
             let files = allFiles
                 .filter { $0.pathExtension == "jsonl" && !$0.lastPathComponent.hasPrefix("agent-") }
@@ -995,15 +1034,13 @@ final class ClaudeCodeManager: ObservableObject {
                     return date1 > date2
                 }
 
-            debugLog("[ClaudeCode] findCurrentSessionFile: \(files.count) JSONL files found")
-            if let first = files.first {
-                debugLog("[ClaudeCode] findCurrentSessionFile: using \(first.lastPathComponent)")
-            }
+            debugLog("[ClaudeCode] findActiveSessionFiles: \(files.count) JSONL files found")
 
-            return files.first
+            // Return all recent files, not just the first one
+            return files
         } catch {
-            debugLog("[ClaudeCode] findCurrentSessionFile: error: \(error)")
-            return nil
+            debugLog("[ClaudeCode] findActiveSessionFiles: error: \(error)")
+            return []
         }
     }
 

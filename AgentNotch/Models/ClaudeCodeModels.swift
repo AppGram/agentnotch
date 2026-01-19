@@ -11,7 +11,7 @@ import Foundation
 
 /// Represents an active Claude Code IDE session from ~/.claude/ide/*.lock
 struct ClaudeSession: Identifiable, Codable, Equatable {
-    var id: String { workspaceFolders.first ?? "\(pid)" }
+    var id: String { "\(ideName):\(workspaceFolders.first ?? "\(pid)")" }
 
     let pid: Int
     let workspaceFolders: [String]
@@ -23,16 +23,27 @@ struct ClaudeSession: Identifiable, Codable, Equatable {
     /// Claude Code uses path with "/" replaced by "-" as the project directory name
     var projectKey: String? {
         guard let workspace = workspaceFolders.first else { return nil }
+        // Strip session fragment if present (e.g., /path#sessionId -> /path)
+        let cleanPath = workspace.components(separatedBy: "#").first ?? workspace
         // Claude Code escapes the path: "/" -> "-", but keeps leading "-" for absolute paths
         // e.g., /Users/foo/project -> -Users-foo-project
-        return workspace
+        return cleanPath
             .replacingOccurrences(of: "/", with: "-")
     }
 
     /// Display name for UI (last folder component)
     var displayName: String {
         guard let workspace = workspaceFolders.first else { return "Unknown" }
-        return URL(fileURLWithPath: workspace).lastPathComponent
+        // Strip session fragment if present (e.g., /path#sessionId -> /path)
+        let cleanPath = workspace.components(separatedBy: "#").first ?? workspace
+        return URL(fileURLWithPath: cleanPath).lastPathComponent
+    }
+
+    /// Terminal session ID extracted from workspace fragment (nil for IDE sessions)
+    var terminalSessionId: String? {
+        guard let workspace = workspaceFolders.first else { return nil }
+        let parts = workspace.components(separatedBy: "#")
+        return parts.count > 1 ? parts[1] : nil
     }
 }
 
